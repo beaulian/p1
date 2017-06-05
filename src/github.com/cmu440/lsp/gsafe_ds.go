@@ -135,6 +135,13 @@ func (a *SyncCounter) Set(num int) {
     a.counter = num
 }
 
+func (a *SyncCounter) Add(num int) {
+    a.m.Lock()
+    defer a.m.Unlock()
+
+    a.counter += num
+}
+
 type SyncBool struct {
 	m *sync.Mutex
 	bValue	bool

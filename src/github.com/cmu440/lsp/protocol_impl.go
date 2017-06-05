@@ -25,14 +25,14 @@ type LSPConn struct {
 	conn *lspnet.UDPConn
     // 发送窗口相关数据
     // 待发送的消息队列
-    tempSendBuf *Queue
+    // tempSendBuf *Queue
     sendWindow *SyncMap
     sendWindowMax *SyncCounter
     lastAckSeqNum *SyncCounter
     // 接收窗口
     recvWindow *SyncMap
-    // 暂存消息队列
-    tempRecvBuf *Queue
+    // 这个消息队列是用来存放那些失序的消息，因为失序的不能直接发送到Read函数
+    // tempRecvBuf *Queue
     recvWindowMax *SyncCounter
     lastRecvSeqNum *SyncCounter
     recvMsgCount *SyncCounter
@@ -43,7 +43,7 @@ type LSPConn struct {
     handleSendMsgChan chan *Message
 	// readChan chan *Message
 	// writeChan chan *Message
-    recvMsgChan chan *Message
+    recvMsgChan chan interface{}
     canClose *SyncBool
     // 当前定时器超时次数
 	epochCounter *SyncCounter
@@ -77,7 +77,6 @@ func NewLSP(params *Params, isServer bool) *LSP {
 }
 
 func (l *LSP) DialLSP(hostport string) (*LSPConn, error) {
-
     if addr, err := lspnet.ResolveUDPAddr("udp", hostport); err != nil {
 		return nil, err
 	} else if conn, err := lspnet.DialUDP("udp", nil, addr); err != nil {
@@ -146,9 +145,9 @@ func (l *LSP) createConn(conn *lspnet.UDPConn, rAddr *lspnet.UDPAddr, params *Pa
         handleSendMsgChan: make(chan *Message, MAXN),
     	// readChan chan *Message
     	// writeChan chan *Message
-        tempSendBuf: NewQueue(),
-        tempRecvBuf: NewQueue(),
-        recvMsgChan: make(chan *Message, MAXN),
+        // tempSendBuf: NewQueue(),
+        // tempRecvBuf: NewQueue(),
+        recvMsgChan: make(chan interface{}, MAXN),
         canClose: NewSyncBool(false),
         // 当前定时器超时次数
     	epochCounter: NewSyncCounter(0),
@@ -188,13 +187,14 @@ func (l *LSP) sendMsg(c *LSPConn, msg *Message) error {
             return err2
         }
     }
-    // fmt.Println("发送：", msg)
+    if msg.Type == MsgData && !l.isServer {
+        // fmt.Println("发送：", msg)
+    }
 	return nil
 }
 
 // 接收单个消息
 func (l *LSP) recvMsg(c *LSPConn) (*Message, *lspnet.UDPAddr, error) {
-    // c.conn.SetReadDeadline(time.Now().Add(time.Millisecond * time.Duration(l.params.EpochMillis)))
 	buffer := make([]byte, MAXN)
 	if size, rAddr, err := c.conn.ReadFromUDP(buffer); err != nil {
 		return nil, nil, err
@@ -203,7 +203,9 @@ func (l *LSP) recvMsg(c *LSPConn) (*Message, *lspnet.UDPAddr, error) {
 		if err = json.Unmarshal(buffer[:size], &msg); err != nil {
 			return nil, nil, err
 		}
-        // fmt.Println("接收：", msg)
+        if msg.Type == MsgData && l.isServer {
+            // fmt.Println("接收：", msg)
+        }
 		return &msg, rAddr, nil
 	}
 }
@@ -223,11 +225,7 @@ func (l *LSP) recvMsgLoop(c *LSPConn) {
             if err != nil {
                 return
             }
-            // fmt.Printf("%d %s\n", c.connID, msg.Payload)
-            // 保存remote address
             if l.isServer && msg.Type == MsgConnect {
-                    // fmt.Println("yes")
-                    // 发送Ack
                     c1 := l.createConn(c.conn, nil, l.params)
                     l.connCount++
                     c1.connID = l.connCount
@@ -244,18 +242,7 @@ func (l *LSP) recvMsgLoop(c *LSPConn) {
     }
 }
 
-
-func (l *LSP) handleSendMsg(c *LSPConn, msg *Message) {
-    if msg.SeqNum <= c.sendWindowMax.Value() {
-        // fmt.Println("send: ", msg)
-        l.sendMsg(c, msg)
-    } else if msg.SeqNum > c.lastAckSeqNum.Value() {
-        c.tempSendBuf.Push(msg)
-        // fmt.Println("waiting send: ", msg)
-    }
-}
-
-func (l *LSP) handleMoveWindow(c *LSPConn, msg *Message) int {
+func (l *LSP) handleMoveWindow(c *LSPConn, msg *Message) (int, int) {
     flag := false
     var i int
     var lastSeqNum int
@@ -265,6 +252,7 @@ func (l *LSP) handleMoveWindow(c *LSPConn, msg *Message) int {
         lastSeqNum = c.lastRecvSeqNum.Value()
         windowMax = c.recvWindowMax.Value()
         window = c.recvWindow
+        // fmt.Println(window, lastSeqNum, windowMax)
     } else if msg.Type == MsgAck {
         lastSeqNum = c.lastAckSeqNum.Value()
         windowMax = c.sendWindowMax.Value()
@@ -307,52 +295,51 @@ func (l *LSP) handleMoveWindow(c *LSPConn, msg *Message) int {
         }
     }
     if flag {
-        return 0
+        return -1, -1
     } else {
-        return (endRecvSeqNum - lastSeqNum)
+        return endRecvSeqNum, lastSeqNum
     }
 }
 
 // 处理接收窗口中接到的消息
-func (l *LSP) handleRecvMsg(c *LSPConn, msg *Message) {
-    // fmt.Println("recv: ", msg)
+func (l *LSP) handleRecvMsg(c *LSPConn, msg *Message, recvMsgChan chan interface{}) {
+    //只要收到了消息就置0
+    c.epochCounter.Set(0)
     if msg.Type == MsgData {
+        // fmt.Println(msg)
         c.recvMsgCount.Inc()
         c.recvWindow.Set(msg.SeqNum, msg)
-        count := l.handleMoveWindow(c, msg)
-        c.recvWindowMax.Set(c.recvWindowMax.Value() + count)
-        c.lastRecvSeqNum.Set(c.lastRecvSeqNum.Value() + count)
+        endSeqNum, lastSeqNum := l.handleMoveWindow(c, msg)
+        // fmt.Println(endSeqNum, lastSeqNum)
+        if endSeqNum != -1 && lastSeqNum != -1 {
+            for i := lastSeqNum+1; i<= endSeqNum; i++ {
+                // 发送给上层Read函数
+                recvMsgChan <- c.recvWindow.Get(i).(*Message)
+            }
+        }
+        c.recvWindowMax.Add(endSeqNum - lastSeqNum)
+        c.lastRecvSeqNum.Add(endSeqNum - lastSeqNum)
         c.canClose.Set(true)
     } else if msg.Type == MsgAck {
         if ackMsg, ok := c.sendWindow.Get(msg.SeqNum).(*AckMsg); ok {
             ackMsg.isAck = true
             c.sendWindow.Set(msg.SeqNum, ackMsg)
         }
-        count := l.handleMoveWindow(c, msg)
-        c.sendWindowMax.Set(c.sendWindowMax.Value() + count)
+        endSeqNum, lastSeqNum := l.handleMoveWindow(c, msg)
+        c.sendWindowMax.Add(endSeqNum - lastSeqNum)
         // c.syncChan <- true
-        c.lastAckSeqNum.Set(c.lastAckSeqNum.Value() + count)
+        c.lastAckSeqNum.Add(endSeqNum - lastSeqNum)
         c.canClose.Set(true)
-        if count != 0 {
-            // 重发暂存队列的消息
-            for e := c.tempSendBuf.Values().Front(); e != nil; e = e.Next() {
-                msg := e.Value.(*Message)
-        		if msg.SeqNum > c.lastAckSeqNum.Value() && msg.SeqNum <= c.sendWindowMax.Value() {
-                    c.handleSendMsgChan <- msg
-                    c.tempSendBuf.Remove(e)
-                }
-        	}
-        }
     }
     return
 }
 
-func (l *LSP) handleEpochEvent(c *LSPConn) {
+func (l *LSP) handleEpochEvent(c *LSPConn, recvMsgChan chan interface{}) {
     c.epochCounter.Inc()
     // 如果超过了次数限制
     if c.epochCounter.Value() >= l.params.EpochLimit {
         c.isLost.Set(true)
-        l.Close(c.connID)
+        recvMsgChan <- c.connID
         return
     }
     // 如果没收到任何消息
@@ -383,35 +370,46 @@ func (c *LSPConn) canCloseChan() bool {
 }
 
 // 核心函数，处理消息
-func (l *LSP) handleMsgLoop(c *LSPConn, recvMsgChan chan *Message) {
+func (l *LSP) handleMsgLoop(c *LSPConn, recvMsgChan chan interface{}) {
     for {
-        select {
-        case msg := <- c.handleRecvMsgChan:
-            // 接收到的消息介于这两个数之间，否则直接丢弃
-            if msg.Type == MsgData && msg.SeqNum > c.lastRecvSeqNum.Value() && msg.SeqNum <= c.recvWindowMax.Value() {
-                // 发送给上层Read函数
-                recvMsgChan <- msg
-                // 检查是否未按序到达
-                l.handleRecvMsg(c, msg)
-                // 对这次发送的数据确认
-                l.sendMsg(c, NewAck(c.connID, msg.SeqNum))
-            } else if msg.Type == MsgAck && msg.SeqNum > c.lastAckSeqNum.Value() && msg.SeqNum <= c.sendWindowMax.Value() {
-                l.handleRecvMsg(c, msg)
-            }
-        case msg := <- c.handleSendMsgChan:
-            if msg.Type == MsgData {
-                c.sendWindow.Set(msg.SeqNum, &AckMsg{isAck: false, msg: msg})
-                // 启动超时定时器
-                c.epochTimer.Reset(time.Millisecond * time.Duration(l.params.EpochMillis))
-                l.handleSendMsg(c, msg)
-            }
-        case <- c.epochTimer.C:
-            //   fmt.Println("触发定时器...")
-              go l.handleEpochEvent(c)
-        case connID := <- l.startCloseChan:
-            if l.connMap[connID].canCloseChan() {
-                l.readyCloseChan <- connID
-                return
+        if c.isLost.Value() {
+            select {
+            case connID := <- l.startCloseChan:
+                if l.connMap[connID].canCloseChan() {
+                    l.readyCloseChan <- connID
+                    return
+                }
+			}
+        } else {
+            select {
+            case msg := <- c.handleRecvMsgChan:
+                // 接收到的消息介于这两个数之间，否则直接丢弃
+                if msg.Type == MsgData && msg.SeqNum > c.lastRecvSeqNum.Value() && msg.SeqNum <= c.recvWindowMax.Value() {
+                    // recvMsgChan <- msg
+                    // 检查是否未按序到达
+                    l.handleRecvMsg(c, msg, recvMsgChan)
+                    // 对这次发送的数据确认
+                    l.sendMsg(c, NewAck(c.connID, msg.SeqNum))
+                } else if msg.Type == MsgAck && msg.SeqNum > c.lastAckSeqNum.Value() && msg.SeqNum <= c.sendWindowMax.Value() {
+                    l.handleRecvMsg(c, msg, recvMsgChan)
+                }
+            case msg := <- c.handleSendMsgChan:
+                if msg.Type == MsgData {
+                    c.sendWindow.Set(msg.SeqNum, &AckMsg{isAck: false, msg: msg})
+                    // 启动超时定时器
+                    c.epochTimer.Reset(time.Millisecond * time.Duration(l.params.EpochMillis))
+                    if msg.SeqNum > c.lastAckSeqNum.Value() && msg.SeqNum <= c.sendWindowMax.Value() {
+                        l.sendMsg(c, msg)
+                    }
+                }
+            case <- c.epochTimer.C:
+                //   fmt.Println("触发定时器...")
+                  go l.handleEpochEvent(c, recvMsgChan)
+            case connID := <- l.startCloseChan:
+                if l.connMap[connID].canCloseChan() {
+                    l.readyCloseChan <- connID
+                    return
+                }
             }
         }
     }
@@ -419,16 +417,22 @@ func (l *LSP) handleMsgLoop(c *LSPConn, recvMsgChan chan *Message) {
 
 func (l *LSP) Read(c *LSPConn) (int, []byte, error) {
     select {
-    case msg := <- c.recvMsgChan:
-        return msg.ConnID, msg.Payload, nil
+    case data := <- c.recvMsgChan:
+		msg, ok := data.(*Message)
+		if ok {
+            // fmt.Println("reading: ", msg)
+			return msg.ConnID, msg.Payload, nil
+		} else {
+			return -1, nil, nil
+		}
     }
-    return -1, nil, nil
 }
 
 func (l *LSP) Write(connID int, payload []byte) error {
     c := l.connMap[connID]
-	if !c.isLost.Value() {
+	if c != nil && !c.isLost.Value() {
         msg := NewData(connID, c.nextSeqNum.Value(), payload)
+        // fmt.Println("writing: ", msg)
     	c.nextSeqNum.Inc()
     	c.handleSendMsgChan <- msg
     	return nil
