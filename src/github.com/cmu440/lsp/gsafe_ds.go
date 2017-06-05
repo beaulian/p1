@@ -2,7 +2,7 @@ package lsp
 
 import (
     "sync"
-    "errors"
+    // "errors"
     "container/list"
 )
 
@@ -33,7 +33,7 @@ type Queue struct {
 }
 
 func NewQueue() *Queue {
-    return &Queue{ new(sync.Mutex), &list.List{} }
+    return &Queue{ new(sync.Mutex), list.New() }
 }
 
 func (q *Queue) Push(value interface{}) {
@@ -54,6 +54,13 @@ func (q *Queue) Pop() interface{} {
     return nil
 }
 
+func (q *Queue) Remove(value *list.Element) {
+    q.m.Lock()
+    defer q.m.Unlock()
+
+    q.list.Remove(value)
+}
+
 func (q *Queue) Len() int {
     q.m.Lock()
     defer q.m.Unlock()
@@ -61,25 +68,11 @@ func (q *Queue) Len() int {
     return q.list.Len()
 }
 
-func (q *Queue) Values(offset int) ([]interface{}, error) {
+func (q *Queue) Values() (*list.List) {
     q.m.Lock()
-    defer q.m.Unlock()
+	defer q.m.Unlock()
 
-    len := q.list.Len()
-    if offset >= len {
-        return nil, errors.New("list out of index")
-    }
-    values := make([]interface{}, len - offset)
-    e := q.list.Front()
-    for offset > 0 {
-        e = e.Next()
-        offset--
-    }
-    for e != nil {
-        values = append(values, e.Value)
-        e = e.Next()
-    }
-    return values, nil
+	return q.list
 }
 
 type SyncMap struct {
