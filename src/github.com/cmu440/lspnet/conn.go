@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"time"
 	"sync/atomic"
 )
 
@@ -114,4 +115,12 @@ func (c *UDPConn) Close() error {
 
 func dropIt(dropPercent int) bool {
 	return rand.Intn(100) < dropPercent
+}
+
+func (c *UDPConn) SetDeadline(t time.Time) error {
+  return c.nconn.SetDeadline(t)
+}
+
+func (c *UDPConn) SetReadDeadline(t time.Time) error {
+  return c.nconn.SetReadDeadline(t)
 }

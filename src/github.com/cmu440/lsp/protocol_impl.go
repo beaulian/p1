@@ -44,10 +44,12 @@ type LSPConn struct {
 	// readChan chan *Message
 	// writeChan chan *Message
     recvMsgChan chan interface{}
+    closeClientChan chan int
+    doneCloseChan chan int
     canClose *SyncBool
     // 当前定时器超时次数
 	epochCounter *SyncCounter
-	epochTimer *time.Timer
+	epochTimer *SyncTimer
 
     isLost *SyncBool
 
@@ -59,8 +61,7 @@ type LSP struct {
     connCount int
 	connMap map[int]*LSPConn
     newLSPConn chan *LSPConn
-    startCloseChan chan int
-    readyCloseChan chan int
+    closeServerChan chan int
     doneCloseChan chan int
     // 使用该协议的是不是服务端
 	isServer	bool
@@ -69,11 +70,9 @@ type LSP struct {
 func NewLSP(params *Params, isServer bool) *LSP {
     connMap := make(map[int]*LSPConn)
     newLSPConn := make(chan *LSPConn)
-    startCloseChan := make(chan int)
-    readyCloseChan := make(chan int)
+    closeServerChan := make(chan int)
     doneCloseChan := make(chan int)
-    return &LSP{params, 0, connMap, newLSPConn, startCloseChan,
-                readyCloseChan, doneCloseChan, isServer}
+    return &LSP{params, 0, connMap, newLSPConn, closeServerChan, doneCloseChan, isServer}
 }
 
 func (l *LSP) DialLSP(hostport string) (*LSPConn, error) {
@@ -94,7 +93,7 @@ func (l *LSP) DialLSP(hostport string) (*LSPConn, error) {
 		for {
 			select {
 			// 定时器超时
-            case <- c.epochTimer.C:
+        case <- c.epochTimer.GetC():
                 c.epochCounter.Inc()
 				if c.epochCounter.Value() >= l.params.EpochMillis {
 					return nil, errors.New("Error: Connection cannot established.")
@@ -148,10 +147,13 @@ func (l *LSP) createConn(conn *lspnet.UDPConn, rAddr *lspnet.UDPAddr, params *Pa
         // tempSendBuf: NewQueue(),
         // tempRecvBuf: NewQueue(),
         recvMsgChan: make(chan interface{}, MAXN),
+        // startCloseChan: make(chan int, 1),
+        closeClientChan: make(chan int, 1),
+        doneCloseChan: make(chan int, 1),
         canClose: NewSyncBool(false),
         // 当前定时器超时次数
     	epochCounter: NewSyncCounter(0),
-    	epochTimer: time.NewTimer(time.Millisecond * time.Duration(l.params.EpochMillis)),
+    	epochTimer: NewSyncTimer(time.Millisecond * time.Duration(l.params.EpochMillis)),
 
         isLost: NewSyncBool(false),
 
@@ -167,6 +169,7 @@ func (l *LSP) ListenLSP(lAddr *lspnet.UDPAddr) (*LSPConn, error) {
         return nil, err
     }
     s := l.createConn(conn, nil, l.params)
+    s.canClose.Set(true)
     l.connMap[s.connID] = s
     go l.recvMsgLoop(s)
     return s, nil
@@ -195,6 +198,8 @@ func (l *LSP) sendMsg(c *LSPConn, msg *Message) error {
 
 // 接收单个消息
 func (l *LSP) recvMsg(c *LSPConn) (*Message, *lspnet.UDPAddr, error) {
+    // 这里是为了不让接收消息这个过程一直阻塞
+    c.conn.SetReadDeadline(time.Now().Add(time.Millisecond * time.Duration(l.params.EpochMillis)))
 	buffer := make([]byte, MAXN)
 	if size, rAddr, err := c.conn.ReadFromUDP(buffer); err != nil {
 		return nil, nil, err
@@ -216,14 +221,14 @@ func (l *LSP) recvMsgLoop(c *LSPConn) {
     // c := l.connMap[connID]
     for {
         select {
-        case connID := <- l.readyCloseChan:
-            l.doneCloseChan <- connID
-            close(l.connMap[connID].recvMsgChan)
+        case <- l.closeServerChan:
+            close(c.recvMsgChan)
+            l.doneCloseChan <- 1
             return
         default:
             msg, rAddr, err := l.recvMsg(c)
             if err != nil {
-                return
+                continue
             }
             if l.isServer && msg.Type == MsgConnect {
                     c1 := l.createConn(c.conn, nil, l.params)
@@ -362,7 +367,7 @@ func (l *LSP) handleEpochEvent(c *LSPConn, recvMsgChan chan interface{}) {
 	return
 }
 
-func (c *LSPConn) canCloseChan() bool {
+func (l *LSP) canCloseChan(c *LSPConn) bool {
     if c.canClose.Value() && len(c.handleSendMsgChan) == 0 {
         return true
     }
@@ -374,9 +379,10 @@ func (l *LSP) handleMsgLoop(c *LSPConn, recvMsgChan chan interface{}) {
     for {
         if c.isLost.Value() {
             select {
-            case connID := <- l.startCloseChan:
-                if l.connMap[connID].canCloseChan() {
-                    l.readyCloseChan <- connID
+            case <- c.closeClientChan:
+                // fmt.Println(connID)
+                if l.canCloseChan(c) {
+                    c.doneCloseChan <- 1
                     return
                 }
 			}
@@ -402,14 +408,14 @@ func (l *LSP) handleMsgLoop(c *LSPConn, recvMsgChan chan interface{}) {
                         l.sendMsg(c, msg)
                     }
                 }
-            case <- c.epochTimer.C:
+            case <- c.epochTimer.GetC():
                 //   fmt.Println("触发定时器...")
                   go l.handleEpochEvent(c, recvMsgChan)
-            case connID := <- l.startCloseChan:
-                if l.connMap[connID].canCloseChan() {
-                    l.readyCloseChan <- connID
-                    return
-                }
+              case <- c.closeClientChan:
+                  if l.canCloseChan(c) {
+                      c.doneCloseChan <- 1
+                      return
+                  }
             }
         }
     }
@@ -423,10 +429,31 @@ func (l *LSP) Read(c *LSPConn) (int, []byte, error) {
             // fmt.Println("reading: ", msg)
 			return msg.ConnID, msg.Payload, nil
 		} else {
-			return -1, nil, nil
+			return -1, nil, errors.New("Read error, the server has been lost.")
 		}
     }
 }
+
+func (l *LSP) Sread(c *LSPConn) (int, []byte, error) {
+	for {
+		select {
+		case data := <-c.recvMsgChan:
+            id, ok := data.(int)
+			if ok {
+				return id, nil, errors.New("The server read eror, some client has been lost.")
+			}
+			msg, ok := data.(*Message)
+			if !ok {
+				continue
+				//return msg.ConnID, nil, errors.New("The client is explicitly closed.")
+			} else {
+				return msg.ConnID, msg.Payload, nil
+			}
+		}
+	}
+	//return 0, nil, errors.New("Unknow error.")
+}
+
 
 func (l *LSP) Write(connID int, payload []byte) error {
     c := l.connMap[connID]
@@ -441,15 +468,25 @@ func (l *LSP) Write(connID int, payload []byte) error {
 }
 
 func (l *LSP) Close(connID int) error {
-	l.startCloseChan <- connID
-	<-l.doneCloseChan
-	l.connMap[connID].conn.Close()
+    c := l.connMap[connID]
+    if !l.isServer {
+        c.closeClientChan <- 1
+    	<-c.doneCloseChan
+        l.closeServerChan <- 1
+        <-l.doneCloseChan
+    } else {
+        c.closeClientChan <- 1
+    	<-c.doneCloseChan
+    }
+    c.conn.Close()
 	return nil
 }
 
 func (l *LSP) CloseAll() error {
-	for connID, _ := range l.connMap {
-        l.Close(connID)
+	for i := l.connCount; i > 0; i-- {
+        l.Close(l.connMap[i].connID)
     }
+    l.closeServerChan <- 1
+    <-l.doneCloseChan
     return nil
 }

@@ -3,6 +3,7 @@ package lsp
 import (
     "sync"
     // "errors"
+    "time"
     "container/list"
 )
 
@@ -98,6 +99,13 @@ func (a *SyncMap) Get(key int) interface{} {
     return a.mapper[key]
 }
 
+func (a *SyncMap) Remove(key int) {
+    a.m.Lock()
+    defer a.m.Unlock()
+
+    delete(a.mapper, key)
+}
+
 type SyncCounter struct {
     m *sync.Mutex
     counter int
@@ -161,4 +169,23 @@ func (a *SyncBool) Set(value bool) {
 	a.m.Lock()
 	defer a.m.Unlock()
 	a.bValue = value
+}
+
+type SyncTimer struct {
+    m *sync.Mutex
+    timer *time.Timer
+}
+
+func NewSyncTimer(d time.Duration) *SyncTimer {
+	return &SyncTimer{ new(sync.Mutex), time.NewTimer(d) }
+}
+
+func (a *SyncTimer) Reset(d time.Duration) {
+    a.m.Lock()
+    defer a.m.Unlock()
+    a.timer.Reset(d)
+}
+
+func (a *SyncTimer) GetC() <-chan time.Time {
+    return a.timer.C
 }

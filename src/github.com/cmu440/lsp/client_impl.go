@@ -36,5 +36,5 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
-	return c.lsp.CloseAll()
+	return c.lsp.Close(c.conn.connID)
 }

@@ -38,7 +38,7 @@ func NewServer(port int, params *Params) (*server, error) {
 
 func (s *server) Read() (int, []byte, error) {
 	//TODO lsp.WaitForResponse() should return connID
-	if connID, payload, err := s.lsp.Read(s.conn); err != nil {
+	if connID, payload, err := s.lsp.Sread(s.conn); err != nil {
 		return connID, nil, err
 	} else {
 		return connID, payload, nil
