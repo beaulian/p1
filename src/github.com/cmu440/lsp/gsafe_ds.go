@@ -106,6 +106,13 @@ func (a *SyncMap) Remove(key int) {
     delete(a.mapper, key)
 }
 
+func (a *SyncMap) Len() int {
+    a.m.Lock()
+    defer a.m.Unlock()
+
+    return len(a.mapper)
+}
+
 type SyncCounter struct {
     m *sync.Mutex
     counter int

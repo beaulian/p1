@@ -3,8 +3,7 @@
 package lsp
 
 type client struct {
-	conn *LSPConn
-	lsp	*LSP
+	cli *LspClient
 }
 
 func NewClient(hostport string, params *Params) (*client, error) {
@@ -14,17 +13,17 @@ func NewClient(hostport string, params *Params) (*client, error) {
 		return nil, err
 	}
 
-	cli := &client{conn, lsp}
+	cli := &client{conn.(*LspClient)}
 
 	return cli, nil
 }
 
 func (c *client) ConnID() int {
-	return c.conn.connID
+	return c.cli.connID
 }
 
 func (c *client) Read() ([]byte, error) {
-	if _, payload, err := c.lsp.Read(c.conn); err != nil {
+	if payload, err := c.cli.Read(); err != nil {
 		return nil, err
 	} else {
 		return payload, nil
@@ -32,9 +31,9 @@ func (c *client) Read() ([]byte, error) {
 }
 
 func (c *client) Write(payload []byte) error {
-	return c.lsp.Write(c.conn.connID, payload)
+	return c.cli.Write(payload)
 }
 
 func (c *client) Close() error {
-	return c.lsp.Close(c.conn.connID)
+	return c.cli.Close()
 }

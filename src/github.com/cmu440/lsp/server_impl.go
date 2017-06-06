@@ -9,8 +9,7 @@ import (
 )
 
 type server struct {
-	conn *LSPConn
-	lsp	*LSP
+	svr *LspServer
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -31,14 +30,14 @@ func NewServer(port int, params *Params) (*server, error) {
 		return nil, err
 	}
 
-	svr := &server{conn, lsp}
+	svr := &server{conn.(*LspServer)}
 
 	return svr, nil
 }
 
 func (s *server) Read() (int, []byte, error) {
 	//TODO lsp.WaitForResponse() should return connID
-	if connID, payload, err := s.lsp.Sread(s.conn); err != nil {
+	if connID, payload, err := s.svr.Read(); err != nil {
 		return connID, nil, err
 	} else {
 		return connID, payload, nil
@@ -46,13 +45,13 @@ func (s *server) Read() (int, []byte, error) {
 }
 
 func (s *server) Write(connID int, payload []byte) error {
-	return s.lsp.Write(connID, payload)
+	return s.svr.Write(connID, payload)
 }
 
 func (s *server) CloseConn(connID int) error {
-	return s.lsp.Close(connID)
+	return s.svr.CloseConn(connID)
 }
 
 func (s *server) Close() error {
-	return s.lsp.CloseAll()
+	return s.svr.Close()
 }
