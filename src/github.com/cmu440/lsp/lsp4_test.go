@@ -124,7 +124,7 @@ func (ts *syncTestSystem) runNetwork() {
 			t.Log("Waiting for master...")
 			<-ts.masterToNetworkChan
 			t.Log("Setting global write drop percent to 100%")
-			lspnet.SetWriteDropPercent(0)
+			lspnet.SetWriteDropPercent(100)
 			ts.networkToMasterChan <- struct{}{}
 
 			t.Log("Waiting for master...")
