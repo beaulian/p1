@@ -194,5 +194,8 @@ func (a *SyncTimer) Reset(d time.Duration) {
 }
 
 func (a *SyncTimer) GetC() <-chan time.Time {
+    a.m.Lock()
+    defer a.m.Unlock()
+    
     return a.timer.C
 }
