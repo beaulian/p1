@@ -44,13 +44,13 @@ func (q *Queue) Push(value interface{}) {
     q.list.PushBack(value)
 }
 
-func (q *Queue) Pop() interface{} {
+func (q *Queue) Pop() *list.Element {
     q.m.Lock()
     defer q.m.Unlock()
 
     head := q.list.Front()
     if head != nil {
-        return head.Value
+        return head
     }
     return nil
 }
@@ -196,6 +196,6 @@ func (a *SyncTimer) Reset(d time.Duration) {
 func (a *SyncTimer) GetC() <-chan time.Time {
     a.m.Lock()
     defer a.m.Unlock()
-    
+
     return a.timer.C
 }
